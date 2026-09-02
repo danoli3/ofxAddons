@@ -23,6 +23,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: php crawl.php
 
+      # ~4MB of JSON gzips down to ~400KB - the .gz is what
+      # ofx_fetch_latest_crawl_snapshot() on the site actually fetches;
+      # the plain .json stays published too so it's still readable
+      # directly in a browser.
+      - name: Compress the snapshot
+        run: gzip -k9 data/addons.json
+
       - name: Publish a dated release with the snapshot
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -31,9 +38,9 @@ jobs:
           tag="data-$(date -u +%Y-%m-%d)"
           notes="Automated crawl - $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" data/addons.json --clobber
+            gh release upload "$tag" data/addons.json data/addons.json.gz --clobber
           else
-            gh release create "$tag" data/addons.json \
+            gh release create "$tag" data/addons.json data/addons.json.gz \
               --title "Addon data $(date -u +%Y-%m-%d)" \
               --notes "$notes" \
               --target main
