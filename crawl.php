@@ -144,6 +144,53 @@ function ofx_fetch_contents(string $token, string $fullName): ?array
     }
 }
 
+// GET /repos/{owner}/{repo}/releases/latest is a single lightweight
+// call: 200 means at least one release exists, 404 means none do.
+// Cheaper than paging through the full releases list just to check.
+function ofx_has_releases(string $token, string $fullName): bool
+{
+    [$owner, $repo] = array_pad(explode('/', $fullName, 2), 2, '');
+    $url = 'https://api.github.com/repos/' . rawurlencode($owner) . '/' . rawurlencode($repo) . '/releases/latest';
+
+    while (true) {
+        [, $headers, $status] = ofx_request($token, $url);
+
+        if ($status === 200) {
+            return true;
+        }
+        if (ofx_is_rate_limited($headers, $status)) {
+            ofx_sleep_until_reset($headers);
+            continue;
+        }
+        return false;
+    }
+}
+
+// Full names the consuming site has already ruled out (banned as a
+// false positive sharing the "ofx" prefix by coincidence, or
+// deleted) - skip re-fetching these entirely rather than spending API
+// calls on repos we already know the answer for.
+function ofx_fetch_banned_full_names(): array
+{
+    $ch = curl_init('https://ofxaddons.danoli3.com/banned.json');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => 15,
+        CURLOPT_HTTPHEADER => ['User-Agent: ofxaddons-crawler'],
+    ]);
+    $body = curl_exec($ch);
+    $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($status !== 200 || !$body) {
+        fwrite(STDERR, "Could not fetch banned.json ({$status}) - continuing without it\n");
+        return [];
+    }
+
+    $names = json_decode($body, true);
+    return is_array($names) ? array_map('strtolower', $names) : [];
+}
+
 // --- search ---
 $rawItems = [];
 foreach (str_split('0123456789abcdefghijklmnopqrstuvwxyz') as $letter) {
@@ -152,12 +199,19 @@ foreach (str_split('0123456789abcdefghijklmnopqrstuvwxyz') as $letter) {
     $rawItems = [...$rawItems, ...$found];
 }
 
-// --- prune: name must start with ofx, repo must not be empty ---
-$rawItems = array_values(array_filter($rawItems, function (array $item): bool {
+// --- prune: name must start with ofx, repo must not be empty, and
+// skip anything the site has already ruled out (banned/deleted) ---
+$bannedFullNames = array_flip(ofx_fetch_banned_full_names());
+fwrite(STDOUT, count($bannedFullNames) . " banned full_names fetched from the site\n");
+
+$rawItems = array_values(array_filter($rawItems, function (array $item) use ($bannedFullNames): bool {
     if (!preg_match('/^ofx/i', $item['name'] ?? '')) {
         return false;
     }
     if (empty($item['pushed_at'])) {
+        return false;
+    }
+    if (isset($bannedFullNames[strtolower($item['full_name'] ?? '')])) {
         return false;
     }
     return true;
@@ -178,6 +232,7 @@ $total = count($byFullName);
 foreach ($byFullName as $fullName => $item) {
     $i++;
     $contents = ofx_fetch_contents($token, $fullName);
+    $hasReleases = ofx_has_releases($token, $fullName);
 
     $hasMakefile = false;
     $exampleCount = 0;
@@ -217,6 +272,8 @@ foreach ($byFullName as $fullName => $item) {
         'example_count' => $exampleCount,
         'has_correct_folder_structure' => $hasCorrectFolder,
         'has_thumbnail' => $hasThumbnail,
+        'archived' => !empty($item['archived']),
+        'has_releases' => $hasReleases,
     ];
 
     if ($i % 200 === 0) {
