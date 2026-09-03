@@ -261,6 +261,90 @@ function ofx_fetch_newer_forks(string $token, string $fullName, ?string $parentP
     }
 }
 
+// Branches that are ahead of the repo's own default branch (feature
+// work or fixes sitting unmerged) - unlike forks, there's no single
+// list endpoint that reports ahead/behind, so this costs one branches
+// list call plus one compare call per candidate branch. To keep that
+// bounded, only the first 15 non-default branches returned are
+// compared, and only confirmed Addons are checked at all (same scope
+// as fork-tracking above).
+function ofx_fetch_ahead_branches(string $token, string $fullName, ?string $defaultBranch): array
+{
+    if (!$defaultBranch) {
+        return [];
+    }
+    [$owner, $repo] = array_pad(explode('/', $fullName, 2), 2, '');
+    $branchesUrl = 'https://api.github.com/repos/' . rawurlencode($owner) . '/' . rawurlencode($repo)
+        . '/branches?per_page=100';
+
+    $branchNames = [];
+    while (true) {
+        [$body, $headers, $status] = ofx_request($token, $branchesUrl);
+
+        if ($status === 200) {
+            $branches = json_decode($body, true);
+            if (!is_array($branches)) {
+                return [];
+            }
+            foreach ($branches as $b) {
+                $name = $b['name'] ?? null;
+                if ($name && $name !== $defaultBranch) {
+                    $branchNames[] = $name;
+                }
+            }
+            break;
+        }
+
+        if (ofx_is_rate_limited($headers, $status)) {
+            ofx_sleep_until_reset($headers);
+            continue;
+        }
+
+        return [];
+    }
+
+    $branchNames = array_slice($branchNames, 0, 15);
+    $ahead = [];
+
+    foreach ($branchNames as $branch) {
+        $compareUrl = 'https://api.github.com/repos/' . rawurlencode($owner) . '/' . rawurlencode($repo)
+            . '/compare/' . rawurlencode($defaultBranch) . '...' . rawurlencode($branch);
+
+        while (true) {
+            [$body, $headers, $status] = ofx_request($token, $compareUrl);
+
+            if ($status === 200) {
+                $data = json_decode($body, true);
+                $aheadBy = (int)($data['ahead_by'] ?? 0);
+                if ($aheadBy > 0) {
+                    $commits = $data['commits'] ?? [];
+                    $lastCommit = end($commits);
+                    $ahead[] = [
+                        'name' => $branch,
+                        'ahead_by' => $aheadBy,
+                        'behind_by' => (int)($data['behind_by'] ?? 0),
+                        'last_commit_at' => $lastCommit['commit']['committer']['date']
+                            ?? $lastCommit['commit']['author']['date']
+                            ?? null,
+                    ];
+                }
+                break;
+            }
+
+            if (ofx_is_rate_limited($headers, $status)) {
+                ofx_sleep_until_reset($headers);
+                continue;
+            }
+
+            // 404 (branch deleted mid-run), other errors - skip this branch
+            break;
+        }
+    }
+
+    usort($ahead, fn($a, $b) => strcmp($b['last_commit_at'] ?? '', $a['last_commit_at'] ?? ''));
+    return array_slice($ahead, 0, 10);
+}
+
 // --- search ---
 $rawItems = [];
 foreach (str_split('0123456789abcdefghijklmnopqrstuvwxyz') as $letter) {
@@ -325,8 +409,12 @@ foreach ($byFullName as $fullName => $item) {
         }
     }
 
-    $newerForks = isset($addonFullNames[strtolower($fullName)])
+    $isConfirmedAddon = isset($addonFullNames[strtolower($fullName)]);
+    $newerForks = $isConfirmedAddon
         ? ofx_fetch_newer_forks($token, $fullName, $item['pushed_at'] ?? null)
+        : [];
+    $aheadBranches = $isConfirmedAddon
+        ? ofx_fetch_ahead_branches($token, $fullName, $item['default_branch'] ?? null)
         : [];
 
     $results[] = [
@@ -345,6 +433,7 @@ foreach ($byFullName as $fullName => $item) {
         'forks_count' => (int)($item['forks_count'] ?? 0),
         'pushed_at' => $item['pushed_at'] ?? null,
         'created_at' => $item['created_at'] ?? null,
+        'default_branch' => $item['default_branch'] ?? null,
         'has_makefile' => $hasMakefile,
         'example_count' => $exampleCount,
         'has_correct_folder_structure' => $hasCorrectFolder,
@@ -352,6 +441,7 @@ foreach ($byFullName as $fullName => $item) {
         'archived' => !empty($item['archived']),
         'has_releases' => $hasReleases,
         'newer_forks' => $newerForks,
+        'ahead_branches' => $aheadBranches,
     ];
 
     if ($i % 200 === 0) {
