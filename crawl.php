@@ -191,6 +191,76 @@ function ofx_fetch_banned_full_names(): array
     return is_array($names) ? array_map('strtolower', $names) : [];
 }
 
+// Full names the site has actually confirmed are real addons (an
+// admin or owner has categorized them). Fork-tracking only runs for
+// these - checking forks for every Unsorted/Spam repo the search
+// turns up would multiply this crawler's API budget for no benefit,
+// since most of those aren't real addons at all.
+function ofx_fetch_addon_full_names(): array
+{
+    $ch = curl_init('https://ofxaddons.danoli3.com/addon-repos.json');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => 15,
+        CURLOPT_HTTPHEADER => ['User-Agent: ofxaddons-crawler'],
+    ]);
+    $body = curl_exec($ch);
+    $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($status !== 200 || !$body) {
+        fwrite(STDERR, "Could not fetch addon-repos.json ({$status}) - skipping fork tracking this run\n");
+        return [];
+    }
+
+    $names = json_decode($body, true);
+    return is_array($names) ? array_flip(array_map('strtolower', $names)) : [];
+}
+
+// Forks that are more actively maintained than the addon itself -
+// only ones pushed to more recently than the parent's own pushed_at,
+// newest first, capped at 10. The forks list endpoint returns full
+// repo objects (including pushed_at) in one call, so no per-fork
+// follow-up request is needed.
+function ofx_fetch_newer_forks(string $token, string $fullName, ?string $parentPushedAt): array
+{
+    if (!$parentPushedAt) {
+        return [];
+    }
+    [$owner, $repo] = array_pad(explode('/', $fullName, 2), 2, '');
+    $url = 'https://api.github.com/repos/' . rawurlencode($owner) . '/' . rawurlencode($repo)
+        . '/forks?per_page=100&sort=newest';
+
+    while (true) {
+        [$body, $headers, $status] = ofx_request($token, $url);
+
+        if ($status === 200) {
+            $forks = json_decode($body, true);
+            if (!is_array($forks)) {
+                return [];
+            }
+            $newer = array_values(array_filter($forks, function (array $f) use ($parentPushedAt): bool {
+                return !empty($f['pushed_at']) && $f['pushed_at'] > $parentPushedAt;
+            }));
+            usort($newer, fn($a, $b) => strcmp($b['pushed_at'], $a['pushed_at']));
+            return array_map(fn($f) => [
+                'full_name' => $f['full_name'] ?? null,
+                'owner_login' => $f['owner']['login'] ?? null,
+                'owner_avatar_url' => $f['owner']['avatar_url'] ?? null,
+                'stargazers_count' => (int)($f['stargazers_count'] ?? 0),
+                'pushed_at' => $f['pushed_at'] ?? null,
+            ], array_slice($newer, 0, 10));
+        }
+
+        if (ofx_is_rate_limited($headers, $status)) {
+            ofx_sleep_until_reset($headers);
+            continue;
+        }
+
+        return [];
+    }
+}
+
 // --- search ---
 $rawItems = [];
 foreach (str_split('0123456789abcdefghijklmnopqrstuvwxyz') as $letter) {
@@ -203,6 +273,9 @@ foreach (str_split('0123456789abcdefghijklmnopqrstuvwxyz') as $letter) {
 // skip anything the site has already ruled out (banned/deleted) ---
 $bannedFullNames = array_flip(ofx_fetch_banned_full_names());
 fwrite(STDOUT, count($bannedFullNames) . " banned full_names fetched from the site\n");
+
+$addonFullNames = ofx_fetch_addon_full_names();
+fwrite(STDOUT, count($addonFullNames) . " confirmed addon full_names fetched from the site (fork-tracking scope)\n");
 
 $rawItems = array_values(array_filter($rawItems, function (array $item) use ($bannedFullNames): bool {
     if (!preg_match('/^ofx/i', $item['name'] ?? '')) {
@@ -252,6 +325,10 @@ foreach ($byFullName as $fullName => $item) {
         }
     }
 
+    $newerForks = isset($addonFullNames[strtolower($fullName)])
+        ? ofx_fetch_newer_forks($token, $fullName, $item['pushed_at'] ?? null)
+        : [];
+
     $results[] = [
         'full_name' => $fullName,
         'name' => $item['name'] ?? null,
@@ -274,6 +351,7 @@ foreach ($byFullName as $fullName => $item) {
         'has_thumbnail' => $hasThumbnail,
         'archived' => !empty($item['archived']),
         'has_releases' => $hasReleases,
+        'newer_forks' => $newerForks,
     ];
 
     if ($i % 200 === 0) {
