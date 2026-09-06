@@ -23,6 +23,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: php crawl.php
 
+      # First-pass check for script/prompt-injection attempts in a
+      # crawled repo's name/description - read-only, never blocks the
+      # crawl (see scripts/scan_threats.php for why). The consuming site
+      # runs the same check again independently when it applies this
+      # snapshot, which is where an actual ban/quarantine happens.
+      - name: Scan for malicious repo content
+        run: php scripts/scan_threats.php data/addons.json
+
       # ~4MB of JSON gzips down to ~400KB - the .gz is what
       # ofx_fetch_latest_crawl_snapshot() on the site actually fetches;
       # the plain .json stays published too so it's still readable
