@@ -45,10 +45,18 @@ jobs:
           set -euo pipefail
           tag="data-$(date -u +%Y-%m-%d)"
           notes="Automated crawl - $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # data/banned.json is written by ofx_fetch_banned_full_names() in
+          # crawl.php (the banned list this same run actually filtered
+          # against) - only skipped if the site couldn't be reached for it,
+          # so don't hard-fail the whole release on a missing file.
+          assets=(data/addons.json data/addons.json.gz)
+          if [ -f data/banned.json ]; then
+            assets+=(data/banned.json)
+          fi
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" data/addons.json data/addons.json.gz --clobber
+            gh release upload "$tag" "${assets[@]}" --clobber
           else
-            gh release create "$tag" data/addons.json data/addons.json.gz \
+            gh release create "$tag" "${assets[@]}" \
               --title "Addon data $(date -u +%Y-%m-%d)" \
               --notes "$notes" \
               --target main

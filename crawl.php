@@ -188,7 +188,20 @@ function ofx_fetch_banned_full_names(): array
     }
 
     $names = json_decode($body, true);
-    return is_array($names) ? array_map('strtolower', $names) : [];
+    if (!is_array($names)) {
+        return [];
+    }
+
+    // Persisted here (original casing, not the lowercased copy returned
+    // below) so the exact banned list this run actually filtered
+    // against is visible in this repo's own Github Release alongside
+    // data/addons.json (see the bottom of this script and crawl.yml's
+    // "Publish a dated release" step) - instead of only ever existing
+    // transiently in a workflow run's memory.
+    @mkdir(__DIR__ . '/data', 0777, true);
+    file_put_contents(__DIR__ . '/data/banned.json', json_encode($names, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+
+    return array_map('strtolower', $names);
 }
 
 // Full names the site has actually confirmed are real addons (an
