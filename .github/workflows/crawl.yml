@@ -31,12 +31,12 @@ jobs:
       - name: Scan for malicious repo content
         run: php scripts/scan_threats.php data/addons.json
 
-      # ~4MB of JSON gzips down to ~400KB - the .gz is what
-      # ofx_fetch_latest_crawl_snapshot() on the site actually fetches;
-      # the plain .json stays published too so it's still readable
-      # directly in a browser.
+      # ~4MB of JSON gzips down to ~400KB - the .gz is the only one
+      # published (see below); ofx_fetch_latest_crawl_snapshot() on the
+      # site only ever fetches the .gz too, so there's no reason to
+      # publish the ~10x-larger plain .json as well.
       - name: Compress the snapshot
-        run: gzip -k9 data/addons.json
+        run: gzip -9 data/addons.json
 
       - name: Publish a dated release with the snapshot
         env:
@@ -49,7 +49,7 @@ jobs:
           # crawl.php (the banned list this same run actually filtered
           # against) - only skipped if the site couldn't be reached for it,
           # so don't hard-fail the whole release on a missing file.
-          assets=(data/addons.json data/addons.json.gz)
+          assets=(data/addons.json.gz)
           if [ -f data/banned.json ]; then
             assets+=(data/banned.json)
           fi
